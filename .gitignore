@@ -1,0 +1,36 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Checkpoint 21/09/2026 : exclusions complementaires
+# Installateurs et executables construits (96 a 310 Mo, distribues via GitHub Releases)
+release/
+# Reglages locaux de Claude Code
+.claude/settings.local.json
+# Variables d'environnement et secrets : ne doivent JAMAIS partir dans le depot
+.env
+.env.*
+!.env.example
+*.pem
+*.key

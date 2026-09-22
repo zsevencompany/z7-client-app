@@ -1,0 +1,1 @@
+export const API = 'https://z7-backend.onrender.com/api'; 

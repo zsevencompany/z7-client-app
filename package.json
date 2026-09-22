@@ -1,0 +1,68 @@
+{
+  "name": "z7-client-app",
+  "version": "1.0.3",
+  "description": "Z7 Competition — App Client Organisateur",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite",
+    "electron": "electron .",
+    "start": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "tsc -b && vite build",
+    "build:electron": "npm run build && electron-builder",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.z7competition.client",
+    "productName": "Z7 Client",
+    "publish": {
+      "provider": "github",
+      "owner": "zsevencompany",
+      "repo": "z7-client-app",
+      "releaseType": "draft"
+    },
+    "extraResources": [
+      {
+        "from": "parser",
+        "to": "parser"
+      }
+    ],
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "public/LOGO-Z7-V2.ico"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/LOGO-Z7-V2.ico"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "electron": "^36.3.1",
+    "electron-builder": "^26.0.12",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "wait-on": "^9.0.10"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "author": "Z7 Competition"
+}
