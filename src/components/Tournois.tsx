@@ -481,12 +481,36 @@ export default function Tournois({ session }: TournoisProps) {
   //  l'equipe entiere : un duo qui gagnait recevait deux fois la moitie
   //  des points de son placement, jamais le compte juste.
   //
-  //  Desormais deux comptes sont tenus cote a cote :
-  //    • `points` / `kills`            — ceux de l'EQUIPE, identiques pour
-  //                                       chacun de ses membres ;
-  //    • `individualPoints` / `individualKills` — la part propre du
-  //                                       joueur, pour la vue Joueurs.
-  //  Le site affichait deux fois les memes chiffres faute de cette part.
+  //  ⚠️ CORRECTION DU 30/09/2026 — IL N'Y A PAS DE « PART PROPRE ».
+  //
+  //  Ce constructeur calculait, pour chaque membre, des points et des
+  //  kills PERSONNELS a partir de SES seules eliminations :
+  //
+  //      const ptsPropres = calcPoints(placement, p.eliminations, st);
+  //
+  //  C'etait une REPARTITION de la performance de l'equipe entre ses
+  //  membres, et cette notion n'existe pas a Z7 Competition. Une
+  //  performance realisee par une equipe pendant une partie appartient
+  //  INTEGRALEMENT a chacun de ceux qui la composaient : si un squad
+  //  fait 20 kills, ses quatre joueurs comptent 20 kills chacun, et non
+  //  8 / 5 / 4 / 3.
+  //
+  //  (La meme repartition existait dans `buildPayload`, le constructeur
+  //  mono-partie deja remplace par celui-ci. Il n'en reste donc qu'un
+  //  seul chemin, et c'est ici.)
+  //
+  //  CE QUI DISTINGUE DEUX JOUEURS n'est donc jamais un partage : c'est
+  //  le nombre de parties auxquelles chacun a participe. En Duo,
+  //  Zoro + Zen puis Zoro + Darsh donne Zoro = les deux parties, Zen la
+  //  premiere, Darsh la seconde — chacun avec l'INTEGRALITE de ce que
+  //  son equipe a fait sur ces parties-la.
+  //
+  //  `individualPoints` / `individualKills` sont CONSERVES : des
+  //  resultats deja enregistres les portent, et d'anciens lecteurs les
+  //  lisent. Ils decrivent desormais le parcours REELLEMENT joue par ce
+  //  joueur — donc la meme chose que `points` / `kills`, qui ne
+  //  cumulaient deja que ses propres parties. Aucun ancien
+  //  enregistrement n'est reecrit.
   //
   //  Les coequipiers partent en `mates`, par IDENTIFIANT. `currentMate`
   //  — la chaine de pseudos — continue d'etre rempli pour les lecteurs
@@ -508,15 +532,16 @@ export default function Tournois({ session }: TournoisProps) {
         const wins        = placement === 1 ? 1 : 0;
 
         membres.forEach(p => {
-          const ptsPropres = calcPoints(placement, p.eliminations, st);
           const autres = membres.filter(x => x.epicId !== p.epicId);
           const mates  = autres.map(x => ({ epicId: x.epicId, name: x.displayName }));
           const existing = playerMap.get(p.epicId);
           if (existing) {
             existing.points           += ptsEquipe;
             existing.kills            += killsEquipe;
-            existing.individualPoints += ptsPropres;
-            existing.individualKills  += p.eliminations;
+            //  Le joueur recoit l'INTEGRALITE de ce que son equipe a
+            //  fait sur cette partie — pas une fraction.
+            existing.individualPoints += ptsEquipe;
+            existing.individualKills  += killsEquipe;
             existing.wins             += wins;
             existing.games            += 1;
             existing.placement         = placement;
@@ -527,8 +552,8 @@ export default function Tournois({ session }: TournoisProps) {
           } else {
             playerMap.set(p.epicId, {
               epicId: p.epicId, name: p.displayName,
-              points: ptsEquipe, individualPoints: ptsPropres,
-              kills: killsEquipe, individualKills: p.eliminations,
+              points: ptsEquipe, individualPoints: ptsEquipe,
+              kills: killsEquipe, individualKills: killsEquipe,
               placement, wins, games: 1,
               mates,
               teamIndex: p.teamIndex ?? null,
