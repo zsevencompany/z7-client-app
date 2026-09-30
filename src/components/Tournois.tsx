@@ -241,93 +241,96 @@ export default function Tournois({ session }: TournoisProps) {
 
   // ── Leaderboard ───────────────────────────────────────────
   function getLeaderboardByTeam(): LeaderboardEntry[] {
+  //  LA VUE EQUIPES  (lot T1.5, CDC-438 a 440)
+  //
+  //  CE QU'ELLE FAISAIT. Elle regroupait les joueurs en rapprochant des
+  //  PSEUDOS decoupes dans une chaine, et n'acceptait que les PAIRES
+  //  RECIPROQUES : un trio ou un squad etait affiche comme trois ou
+  //  quatre joueurs solos. Elle affichait ensuite les points du
+  //  « meilleur » joueur de l'equipe, ce qui perdait les ajustements
+  //  manuels infliges aux autres membres.
+  //
+  //  CE QU'ELLE FAIT. Elle regroupe sur les IDENTIFIANTS de la derniere
+  //  partie, ce qui vaut pour deux joueurs comme pour quatre. La clef
+  //  d'equipe est la liste triee de ces identifiants : deux equipes
+  //  distinctes ne peuvent pas la partager, donc un joueur n'apparait
+  //  jamais dans deux equipes (CDC-440) — par construction, pas par
+  //  verification apres coup.
+  //
+  //  Les points de l'equipe sont ceux de l'equipe, portes a l'identique
+  //  par chacun de ses membres, AUGMENTES de la somme des ajustements
+  //  individuels : une penalite infligee a un joueur doit peser sur son
+  //  equipe, sinon la sanction ne sert a rien.
     const filtered = selectedTournament && selectedStage
       ? tournamentGames.filter(g => g.tournamentId === selectedTournament._id && g.stageId === selectedStage.name && !(g as any).deleted)
       : [];
+    const modeEquipe = estModeEquipe(selectedTournament);
 
     const playerStats = new Map<string, any>();
-    const sortedFiltered = [...filtered].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    sortedFiltered.forEach(game => {
-      const real = game.players.filter(p => !p.isBot);
-      const gameTeams = new Map<number, typeof real>();
-      real.forEach(p => {
-        const ti = p.teamIndex ?? -1;
-        if (!gameTeams.has(ti)) gameTeams.set(ti, []);
-        gameTeams.get(ti)!.push(p);
-      });
-      gameTeams.forEach(members => {
-        const placement = members[0].placement || 999;
-        const totalKills = members.reduce((s, p) => s + p.eliminations, 0);
-        const pts = calcPoints(placement, totalKills);
-        const wins = placement === 1 ? 1 : 0;
-        members.forEach(p => {
-          const others = members.filter(x => x.epicId !== p.epicId);
-          const currentMate = others.length > 0 ? others.map(x => x.displayName).join(' & ') : null;
+    partiesOrdonnees(filtered).forEach(game => {
+      const reels = game.players.filter(p => !p.isBot);
+      equipesDeLaPartie(reels, modeEquipe).forEach(membres => {
+        const placement   = membres[0].placement || 999;
+        const killsEquipe = membres.reduce((s, p) => s + p.eliminations, 0);
+        const pts         = calcPoints(placement, killsEquipe);
+        const wins        = placement === 1 ? 1 : 0;
+        membres.forEach(p => {
+          //  La composition de la DERNIERE partie fait foi.
+          const equipe = membres.map(x => x.epicId).sort();
           const existing = playerStats.get(p.epicId);
           if (existing) {
-            existing.points += pts; existing.kills += totalKills;
+            existing.points += pts; existing.kills += killsEquipe;
             existing.wins += wins; existing.games += 1;
             existing.placements.push(placement);
-            existing.currentMate = currentMate;
+            existing.equipe = equipe;
           } else {
             playerStats.set(p.epicId, {
-              name: p.displayName, epicId: p.epicId, currentMate,
-              points: pts, kills: totalKills, wins, games: 1, placements: [placement],
+              name: p.displayName, epicId: p.epicId, equipe,
+              points: pts, kills: killsEquipe, wins, games: 1, placements: [placement],
             });
           }
         });
       });
     });
 
-    const displayGroups = new Map<string, any>();
-    const processed = new Set<string>();
+    //  Une equipe n'est retenue que si TOUS ses membres declarent la meme
+    //  composition. Une declaration a sens unique — un joueur a change
+    //  d'equipe en cours de manche — ne fusionne rien : chacun reste seul.
+    const memeEquipe = (a: string[], b: string[]) =>
+      a.length === b.length && a.every((x, i) => x === b[i]);
 
-    const addSolo = (player: any) => {
-      processed.add(player.epicId);
-      const avg = player.placements.length
-        ? Math.round(player.placements.reduce((a: number, b: number) => a + b, 0) / player.placements.length) : 999;
-      displayGroups.set(player.epicId, {
-        name: player.name, epicId: player.epicId,
-        finalPoints: player.points, kills: player.kills,
-        wins: player.wins, games: player.games, averagePlacement: avg,
+    const groupes = new Map<string, any[]>();
+    playerStats.forEach(joueur => {
+      const coherente = joueur.equipe.length > 1 && joueur.equipe.every((id: string) => {
+        const autre = playerStats.get(id);
+        return autre && memeEquipe(autre.equipe, joueur.equipe);
       });
-    };
-
-    playerStats.forEach(player => {
-      if (processed.has(player.epicId)) return;
-      if (player.currentMate) {
-        const mateNames = player.currentMate.split(' & ');
-        const mates = mateNames.map((name: string) =>
-          Array.from(playerStats.values()).find((p: any) => p.name === name)
-        ).filter(Boolean) as any[];
-
-        const validMates = mates.filter((mate: any) => {
-          const reciprocal = mate.currentMate && mate.currentMate.split(' & ').includes(player.name);
-          return reciprocal;
-        });
-
-        if (validMates.length > 0) {
-          const allPlayers = [player, ...validMates];
-          const groupKey = allPlayers.map((p: any) => p.epicId).sort().join('_');
-          const groupName = allPlayers.map((p: any) => p.name).sort().join(' & ');
-          allPlayers.forEach((p: any) => processed.add(p.epicId));
-          const best = allPlayers.reduce((max: any, p: any) => p.points > max.points ? p : max);
-          const avg = best.placements.length
-            ? Math.round(best.placements.reduce((a: number, b: number) => a + b, 0) / best.placements.length) : 999;
-          displayGroups.set(groupKey, {
-            name: groupName, epicId: groupKey,
-            finalPoints: best.points, kills: best.kills,
-            wins: best.wins, games: best.games, averagePlacement: avg,
-          });
-        } else {
-          addSolo(player);
-        }
-      } else {
-        addSolo(player);
-      }
+      const cle = coherente ? joueur.equipe.join('|') : joueur.epicId;
+      if (!groupes.has(cle)) groupes.set(cle, []);
+      groupes.get(cle)!.push(joueur);
     });
 
-    return Array.from(displayGroups.values()).sort((a, b) => b.finalPoints - a.finalPoints);
+    const lignes: any[] = [];
+    groupes.forEach((membres, cle) => {
+      const ordonnes = [...membres].sort((a, b) => String(a.epicId).localeCompare(String(b.epicId)));
+      //  Les points de l'equipe sont identiques chez chaque membre : on
+      //  les compte UNE FOIS, et on y ajoute la somme des ajustements.
+      const pointsEquipe = ordonnes.reduce((m, p) => Math.max(m, p.points), 0);
+      const ajustements  = ordonnes.reduce((s, p) => s + (pointsMods.get(p.epicId) || 0), 0);
+      const placements   = ordonnes[0].placements || [];
+      lignes.push({
+        name: ordonnes.map(p => p.name).join(' & '),
+        epicId: cle,
+        finalPoints: pointsEquipe + ajustements,
+        kills: ordonnes.reduce((m, p) => Math.max(m, p.kills), 0),
+        wins:  ordonnes.reduce((m, p) => Math.max(m, p.wins), 0),
+        games: ordonnes.reduce((m, p) => Math.max(m, p.games), 0),
+        averagePlacement: placements.length
+          ? Math.round(placements.reduce((a: number, b: number) => a + b, 0) / placements.length) : 999,
+      });
+    });
+
+    return lignes.sort((a, b) => b.finalPoints - a.finalPoints);
   }
 
   function getLeaderboard(): LeaderboardEntry[] {
@@ -418,36 +421,107 @@ export default function Tournois({ session }: TournoisProps) {
     setShowResults(true);
   }
 
+  // ==================================================================
+  //  LES EQUIPES  (lot T1.5, CDC-438 a 440)
+  // ==================================================================
+  //  Les parties d'une manche, dans l'ORDRE. La composition retenue pour
+  //  un joueur est celle de sa DERNIERE partie : c'est ce que veut dire
+  //  « compositions actualisees quand un joueur change de mate ».
+  const partiesOrdonnees = (games: GameItem[]) =>
+    [...games].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  //  Les equipes d'UNE partie, telles que le replay les donne.
+  //
+  //  DEUX PRECAUTIONS. Un joueur sans `teamIndex` est SEUL : sans cette
+  //  garde, tous les joueurs sans indice se retrouvaient dans une meme
+  //  « equipe » de cent personnes. Et en mode Solo on ne regroupe jamais,
+  //  meme si le replay porte des indices : le mode est ce que
+  //  l'organisateur a annonce.
+  function equipesDeLaPartie(joueurs: Player[], modeEquipe: boolean) {
+    const equipes = new Map<string, Player[]>();
+    joueurs.forEach(p => {
+      const cle = (modeEquipe && p.teamIndex !== null && p.teamIndex !== undefined)
+        ? 'e' + p.teamIndex : 'seul:' + p.epicId;
+      if (!equipes.has(cle)) equipes.set(cle, []);
+      equipes.get(cle)!.push(p);
+    });
+    return equipes;
+  }
+
+  const MODES_EQUIPE = ['Duo', 'Trio', 'Squad'];
+  const estModeEquipe = (t: any) => MODES_EQUIPE.includes(t && t.mode);
+
   // ── Helper : calcul cumulatif depuis une liste de games ─────
   // Utilise les REFS pour avoir les valeurs à jour dans les listeners Electron
+  //
+  //  CE QUI A CHANGE (lot T1.5). Ce constructeur envoyait
+  //  `currentMate: null` pour TOUS les joueurs : l'information d'equipe
+  //  etait pourtant dans le replay, et le site ne pouvait donc jamais
+  //  afficher la moindre equipe. Il comptait aussi les eliminations du
+  //  seul joueur, alors qu'en Duo/Trio/Squad le placement rapporte a
+  //  l'equipe entiere : un duo qui gagnait recevait deux fois la moitie
+  //  des points de son placement, jamais le compte juste.
+  //
+  //  Desormais deux comptes sont tenus cote a cote :
+  //    • `points` / `kills`            — ceux de l'EQUIPE, identiques pour
+  //                                       chacun de ses membres ;
+  //    • `individualPoints` / `individualKills` — la part propre du
+  //                                       joueur, pour la vue Joueurs.
+  //  Le site affichait deux fois les memes chiffres faute de cette part.
+  //
+  //  Les coequipiers partent en `mates`, par IDENTIFIANT. `currentMate`
+  //  — la chaine de pseudos — continue d'etre rempli pour les lecteurs
+  //  anciens, mais plus personne ne s'en sert pour identifier quelqu'un.
   function buildCumulativePayload(games: GameItem[], stage?: any): any[] {
     const st = stage || selectedStageRef.current;
+    const modeEquipe = estModeEquipe(selectedTournamentRef.current);
     const playerMap = new Map<string, any>();
-    games.forEach(game => {
-      game.players.filter(p => !p.isBot).forEach(p => {
-        const placement = p.placement || 999;
-        const kills     = p.eliminations;
-        const pts       = calcPoints(placement, kills, st);
-        const wins      = placement === 1 ? 1 : 0;
-        const existing  = playerMap.get(p.epicId);
-        if (existing) {
-          existing.points += pts;
-          existing.kills  += kills;
-          existing.wins   += wins;
-          existing.games  += 1;
-        } else {
-          playerMap.set(p.epicId, {
-            epicId: p.epicId, name: p.displayName,
-            points: pts, individualPoints: pts,
-            kills, individualKills: kills,
-            placement, wins, games: 1,
-            currentMate: null,
-            disqualified: false,
-            pointsMod: 0,
-          });
-        }
+
+    partiesOrdonnees(games).forEach(game => {
+      const reels = game.players.filter(p => !p.isBot);
+      equipesDeLaPartie(reels, modeEquipe).forEach(membres => {
+        //  Le placement est celui de l'EQUIPE, les eliminations comptent
+        //  pour l'equipe : les points de la partie sont donc les memes
+        //  pour chacun de ses membres.
+        const placement   = membres[0].placement || 999;
+        const killsEquipe = membres.reduce((s, p) => s + p.eliminations, 0);
+        const ptsEquipe   = calcPoints(placement, killsEquipe, st);
+        const wins        = placement === 1 ? 1 : 0;
+
+        membres.forEach(p => {
+          const ptsPropres = calcPoints(placement, p.eliminations, st);
+          const autres = membres.filter(x => x.epicId !== p.epicId);
+          const mates  = autres.map(x => ({ epicId: x.epicId, name: x.displayName }));
+          const existing = playerMap.get(p.epicId);
+          if (existing) {
+            existing.points           += ptsEquipe;
+            existing.kills            += killsEquipe;
+            existing.individualPoints += ptsPropres;
+            existing.individualKills  += p.eliminations;
+            existing.wins             += wins;
+            existing.games            += 1;
+            existing.placement         = placement;
+            //  La DERNIERE partie fait foi pour la composition.
+            existing.mates       = mates;
+            existing.teamIndex   = p.teamIndex ?? null;
+            existing.currentMate = autres.length ? autres.map(x => x.displayName).join(' & ') : null;
+          } else {
+            playerMap.set(p.epicId, {
+              epicId: p.epicId, name: p.displayName,
+              points: ptsEquipe, individualPoints: ptsPropres,
+              kills: killsEquipe, individualKills: p.eliminations,
+              placement, wins, games: 1,
+              mates,
+              teamIndex: p.teamIndex ?? null,
+              currentMate: autres.length ? autres.map(x => x.displayName).join(' & ') : null,
+              disqualified: false,
+              pointsMod: 0,
+            });
+          }
+        });
       });
     });
+
     // Utiliser les REFS pour avoir les valeurs à jour
     playerMap.forEach((p, key) => {
       p.disqualified = disqualifiedRef.current.has(key);
@@ -559,38 +633,14 @@ export default function Tournois({ session }: TournoisProps) {
   }
 
   // ── Build payload ─────────────────────────────────────────
-  function buildPayload(players: Player[]) {
-    const real = players.filter(p => !p.isBot);
-    const teams = new Map<number, Player[]>();
-    real.forEach(p => {
-      const ti = p.teamIndex ?? -1;
-      if (!teams.has(ti)) teams.set(ti, []);
-      teams.get(ti)!.push(p);
-    });
-    const payload: any[] = [];
-    teams.forEach(teamPlayers => {
-      teamPlayers.sort((a, b) => a.displayName.localeCompare(b.displayName));
-      const totalKills = teamPlayers.reduce((s, p) => s + p.eliminations, 0);
-      const placement = teamPlayers[0].placement || 999;
-      const pts = calcPoints(placement, totalKills);
-      const wins = placement === 1 ? 1 : 0;
-      teamPlayers.forEach(p => {
-        const others = teamPlayers.filter(x => x.epicId !== p.epicId);
-        const individualPts = calcPoints(placement, p.eliminations);
-        const isDQ = disqualified.has(p.epicId);
-        const mod  = pointsMods.get(p.epicId) || 0;
-        payload.push({
-          epicId: p.epicId, name: p.displayName,
-          currentMate: others.length ? others.map(x => x.displayName).join(' & ') : null,
-          points: pts, individualPoints: individualPts,
-          kills: totalKills, individualKills: p.eliminations,
-          placement, wins, games: 1,
-          disqualified: isDQ, pointsMod: mod,
-        });
-      });
-    });
-    return payload;
-  }
+  //  `buildPayload` vivait ici. Il n'etait appele NULLE PART, et pourtant
+  //  c'etait lui qui renseignait correctement les coequipiers et la part
+  //  individuelle de chaque joueur. Le constructeur reellement utilise,
+  //  `buildCumulativePayload`, envoyait `currentMate: null` pour tout le
+  //  monde. Du code mort qui fait bien ce que le code vivant fait mal est
+  //  un piege : on le lit, on croit que la fonction est assuree, et on
+  //  cherche le defaut ailleurs. Il est supprime, et sa logique d'equipe
+  //  — la bonne — est passee dans `buildCumulativePayload`.
 
   // ── Actions leaderboard ───────────────────────────────────
   function handleAction(epicId: string, name: string, action: string) {
