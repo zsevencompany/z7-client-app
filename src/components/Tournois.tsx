@@ -366,9 +366,27 @@ export default function Tournois({ session }: TournoisProps) {
   }
 
   // ── Envoi code PP ───────────────────────────────────────────
+  // ============================================================
+  //  LE CODE D'UNE MANCHE  (CDC-421)
+  // ============================================================
+  //  Ce bouton envoyait le code a TOUS LES INSCRITS, sans dire de quelle
+  //  manche il s'agissait — le serveur ne le demandait pas. Un joueur
+  //  elimine en qualification recevait donc le code de la demi-finale,
+  //  c'est-a-dire l'acces qu'on venait precisement de lui retirer.
+  //
+  //  La manche selectionnee est desormais envoyee, et c'est le SERVEUR
+  //  qui en deduit les destinataires : les inscrits pour la premiere
+  //  manche, les qualifies valides ensuite.
   async function sendPPCode() {
     if (!selectedTournament || !ppCode.trim()) return;
-    if (!confirm(`Envoyer le code "${ppCode}" à tous les inscrits ?`)) return;
+    if (!selectedStage) { alert('S\u00e9lectionne d\'abord la manche concern\u00e9e.'); return; }
+    const stageIndex = (selectedTournament.stages || []).indexOf(selectedStage);
+    if (stageIndex < 0) { alert('Manche introuvable dans ce tournoi.'); return; }
+    //  On annonce QUI va le recevoir, pas seulement combien.
+    const cible = stageIndex === 0
+      ? 'tous les inscrits ayant un compte Epic li\u00e9'
+      : `les joueurs qualifi\u00e9s pour \u00ab ${selectedStage.name} \u00bb`;
+    if (!confirm(`Envoyer le code "${ppCode}" à ${cible} ?`)) return;
     setPpSending(true);
     const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
     try {
@@ -379,6 +397,7 @@ export default function Tournois({ session }: TournoisProps) {
           tournamentId: selectedTournament._id,
           code: ppCode,
           tournamentName: selectedTournament.name,
+          stageIndex,
         }),
       });
       const data = await res.json();
