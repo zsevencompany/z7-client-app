@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 import { API } from '../config';
+import { appelApi, clefActive } from '../reseau';
 
 function Dropdown({ value, onChange, options, placeholder, disabled }: {
   value: string;
@@ -250,21 +251,21 @@ export default function Bracket({ session }: BracketProps) {
   const [scoreP2, setScoreP2] = useState('');
   const treeRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
-    fetch(`${API}/brackets/my`, { headers: { 'x-api-key': activeKey } })
-      .then(r => r.json())
-      .then(d => { if (d.success && d.data) setBrackets(d.data); })
-      .catch(() => {});
+  //  12/10/2026 : plus d'echec silencieux — une liste vide sans
+  //  explication ressemblait a « aucun bracket ».
+  async function chargerBrackets() {
+    const r = await appelApi('/brackets/my', { clef: clefActive(session.apiKey) });
+    if (r.ok && r.data && r.data.data) setBrackets(r.data.data);
+    else alert('❌ Liste des brackets indisponible : ' + r.message);
+  }
+  useEffect(() => { chargerBrackets(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.apiKey]);
 
   useEffect(() => {
     if (!selectedBracket) { setBracketDetail(null); return; }
     setLoading(true);
-    fetch(`${API}/brackets/${selectedBracket._id}`)
-      .then(r => r.json())
-      .then(d => { if (d.success) setBracketDetail(d.data); })
-      .catch(() => {})
+    appelApi(`/brackets/${encodeURIComponent(selectedBracket._id)}`)
+      .then(r => { if (r.ok && r.data) setBracketDetail(r.data.data); else alert('❌ Bracket indisponible : ' + r.message); })
       .finally(() => setLoading(false));
   }, [selectedBracket]);
 
@@ -365,13 +366,7 @@ export default function Bracket({ session }: BracketProps) {
       <div style={s.card}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' as const }}>
           <button
-            onClick={() => {
-              const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
-              fetch(`${API}/brackets/my`, { headers: { 'x-api-key': activeKey } })
-                .then(r => r.json())
-                .then(d => { if (d.success && d.data) setBrackets(d.data); })
-                .catch(() => {});
-            }}
+            onClick={() => { chargerBrackets(); }}
             style={{ ...s.btn, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.7)', flexShrink: 0 }}
           >↻ Rafraîchir</button>
           <Dropdown

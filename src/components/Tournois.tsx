@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 import { API } from '../config';
+import { appelApi, clefActive } from '../reseau';
 
 // ── Dropdown custom ──────────────────────────────────────────
 function Dropdown({ value, onChange, options, placeholder, disabled }: {
@@ -133,6 +134,12 @@ export default function Tournois({ session }: TournoisProps) {
   const [pendingGameId, setPendingGameId]           = useState<string | null>(null);
   const [ppCode, setPpCode]                           = useState('');
   const [ppSending, setPpSending]                     = useState(false);
+  //  Audit pre-tournoi du 12/10/2026 : plus aucun echec silencieux. Toute
+  //  erreur reseau ou refus du serveur s'affiche dans ce bandeau.
+  const [alerteReseau, setAlerteReseau]               = useState('');
+  //  Un double clic ne doit jamais declencher deux envois du code : l'etat
+  //  React arrive trop tard pour le second clic, ce verrou non.
+  const envoiCodeEnCours = useRef(false);
   const [pendingReplayName, setPendingReplayName]   = useState<string | null>(null);
   const [gameModalMode, setGameModalMode]           = useState<'teams'|'players'>('teams');
 
@@ -155,13 +162,67 @@ export default function Tournois({ session }: TournoisProps) {
   const replayAPI = (window as any).replayAPI;
 
   // Charger tournois depuis API — clef externe en priorité
+  async function chargerTournois() {
+    const r = await appelApi('/tournaments/my', { clef: clefActive(session.apiKey) });
+    if (r.ok && r.data && Array.isArray(r.data.data)) { setTournaments(r.data.data); return r.data.data; }
+    setAlerteReseau(`Liste des tournois indisponible : ${r.message}`);
+    return null;
+  }
   useEffect(() => {
-    const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
-    fetch(`${API}/tournaments/my`, { headers: { 'x-api-key': activeKey } })
-      .then(r => r.json())
-      .then(d => { if (d.success && d.data) setTournaments(d.data); })
-      .catch(() => {});
+    chargerTournois().then((liste) => {
+      //  Apres un redemarrage : on retrouve le tournoi et la manche choisis.
+      if (!liste) return;
+      const tid = localStorage.getItem('z7_selection_tournoi');
+      const idx = localStorage.getItem('z7_selection_manche');
+      const t = tid ? liste.find((x: any) => x._id === tid) : null;
+      if (!t) return;
+      setSelectedTournament(t);
+      const st = idx !== null ? (t.stages || [])[Number(idx)] : null;
+      if (st) choisirManche(t, st);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.apiKey]);
+
+  // ============================================================
+  //  DISQUALIFICATIONS ET BONUS : PAR TOURNOI ET PAR MANCHE
+  // ============================================================
+  //  Ils vivaient dans deux cles GLOBALES (`z7_disqualified`,
+  //  `z7_points_mods`), jamais remises a zero : la disqualification d'un
+  //  tournoi A repartait dans les resultats du tournoi B. Ils sont
+  //  desormais ranges sous la cle de la manche, et RELUS DU SERVEUR (qui
+  //  fait foi) a chaque selection de manche ; le stockage local n'est plus
+  //  qu'un secours si le serveur ne repond pas.
+  const cleManche = (t: any, idx: number) => `${t._id}_${idx}`;
+  async function chargerSanctions(t: any, idx: number) {
+    let dq = new Set<string>(); let mods = new Map<string, number>();
+    try {
+      const dqLocal = localStorage.getItem(`z7_disqualified_${cleManche(t, idx)}`);
+      const modsLocal = localStorage.getItem(`z7_points_mods_${cleManche(t, idx)}`);
+      if (dqLocal) dq = new Set(JSON.parse(dqLocal));
+      if (modsLocal) mods = new Map(JSON.parse(modsLocal));
+    } catch { /* cache illisible : le serveur tranche */ }
+    const r = await appelApi(`/leaderboard/tournament/${encodeURIComponent(t._id)}?stageIndex=${idx}`);
+    if (r.ok && r.data && Array.isArray(r.data.data)) {
+      dq = new Set(r.data.data.filter((l: any) => l.disqualified).map((l: any) => String(l.epicId)));
+      mods = new Map(r.data.data.filter((l: any) => Number(l.pointsMod)).map((l: any) => [String(l.epicId), Number(l.pointsMod)]));
+    } else {
+      setAlerteReseau(`Disqualifications non relues du serveur (${r.message}) : l'état affiché vient de ce poste.`);
+    }
+    setDisqualified(dq); setPointsMods(mods);
+  }
+  function choisirManche(t: any, item: any) {
+    setSelectedStage(item);
+    if (!t || !item) return;
+    const idx = (t.stages || []).indexOf(item);
+    localStorage.setItem('z7_selection_manche', String(idx));
+    const keyH = `z7_replay_history_${t._id}_${item.name}`;
+    const keyG = `z7_tournament_games_${t._id}_${item.name}`;
+    const savedH = localStorage.getItem(keyH);
+    const savedG = localStorage.getItem(keyG);
+    setReplayHistory(savedH ? JSON.parse(savedH).map((r: any) => ({ ...r, date: new Date(r.date) })) : []);
+    setTournamentGames(savedG ? JSON.parse(savedG).map((g: any) => ({ ...g, date: new Date(g.date) })) : []);
+    chargerSanctions(t, idx);
+  }
 
   // Charger données sauvegardées
   useEffect(() => {
@@ -169,10 +230,10 @@ export default function Tournois({ session }: TournoisProps) {
     if (savedHistory) setReplayHistory(JSON.parse(savedHistory).map((r: any) => ({ ...r, date: new Date(r.date) })));
     const savedGames = localStorage.getItem('z7_tournament_games');
     if (savedGames) setTournamentGames(JSON.parse(savedGames).map((g: any) => ({ ...g, date: new Date(g.date) })));
-    const savedDQ = localStorage.getItem('z7_disqualified');
-    if (savedDQ) setDisqualified(new Set(JSON.parse(savedDQ)));
-    const savedMods = localStorage.getItem('z7_points_mods');
-    if (savedMods) setPointsMods(new Map(JSON.parse(savedMods)));
+    //  Les anciennes cles GLOBALES contaminaient le tournoi suivant : elles
+    //  sont retirees. Le serveur garde les disqualifications de chaque manche.
+    localStorage.removeItem('z7_disqualified');
+    localStorage.removeItem('z7_points_mods');
   }, []);
 
   useEffect(() => {
@@ -186,8 +247,12 @@ export default function Tournois({ session }: TournoisProps) {
     const key = `z7_tournament_games_${selectedTournament._id}_${selectedStage.name}`;
     localStorage.setItem(key, JSON.stringify(tournamentGames));
   }, [tournamentGames, selectedTournament, selectedStage]);
-  useEffect(() => { localStorage.setItem('z7_disqualified', JSON.stringify(Array.from(disqualified))); }, [disqualified]);
-  useEffect(() => { localStorage.setItem('z7_points_mods', JSON.stringify(Array.from(pointsMods))); }, [pointsMods]);
+  useEffect(() => {
+    if (!selectedTournament || !selectedStage) return;
+    const k = cleManche(selectedTournament, (selectedTournament.stages || []).indexOf(selectedStage));
+    localStorage.setItem(`z7_disqualified_${k}`, JSON.stringify(Array.from(disqualified)));
+    localStorage.setItem(`z7_points_mods_${k}`, JSON.stringify(Array.from(pointsMods)));
+  }, [disqualified, pointsMods, selectedTournament, selectedStage]);
 
   // Listeners surveillance Electron
   useEffect(() => {
@@ -380,31 +445,45 @@ export default function Tournois({ session }: TournoisProps) {
   async function sendPPCode() {
     if (!selectedTournament || !ppCode.trim()) return;
     if (!selectedStage) { alert('S\u00e9lectionne d\'abord la manche concern\u00e9e.'); return; }
+    if (envoiCodeEnCours.current) return;
     const stageIndex = (selectedTournament.stages || []).indexOf(selectedStage);
     if (stageIndex < 0) { alert('Manche introuvable dans ce tournoi.'); return; }
+    const code = ppCode.trim();
     //  On annonce QUI va le recevoir, pas seulement combien.
     const cible = stageIndex === 0
-      ? 'tous les inscrits ayant un compte Epic li\u00e9'
-      : `les joueurs qualifi\u00e9s pour \u00ab ${selectedStage.name} \u00bb`;
-    if (!confirm(`Envoyer le code "${ppCode}" à ${cible} ?`)) return;
+      ? 'tous les inscrits ayant un compte Epic li\u00e9 (hors disqualifi\u00e9s)'
+      : `les joueurs autoris\u00e9s pour \u00ab ${selectedStage.name} \u00bb (hors disqualifi\u00e9s)`;
+    if (!confirm(`Envoyer le code "${code}" à ${cible} ?`)) return;
+    envoiCodeEnCours.current = true;
     setPpSending(true);
-    const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
+    setAlerteReseau('');
     try {
-      const res = await fetch(`${API}/bot/send-pp-code`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-        body: JSON.stringify({
-          tournamentId: selectedTournament._id,
-          code: ppCode,
-          tournamentName: selectedTournament.name,
-          stageIndex,
-        }),
+      const envoyer = (renvoyer: boolean) => appelApi('/bot/send-pp-code', {
+        methode: 'POST', clef: clefActive(session.apiKey), delaiMs: 120000,
+        corps: { tournamentId: selectedTournament._id, code, stageIndex, renvoyer },
       });
-      const data = await res.json();
-      if (data.success) { alert(`✅ Code envoyé à ${data.count} joueurs !`); setPpCode(''); }
-      else alert('❌ ' + data.message);
-    } catch { alert('❌ Erreur serveur'); }
-    setPpSending(false);
+      let r = await envoyer(false);
+      //  Le MEME code deja recu par des joueurs : rien n'est renvoye sans un
+      //  choix explicite (un double clic ou une relance ne spamme personne).
+      if (r.ok && r.data && r.data.dejaEnvoyes > 0 && r.data.count === 0
+          && confirm(`Ce code a déjà été envoyé à ${r.data.dejaEnvoyes} joueur(s). Le RENVOYER volontairement à tous ?`)) {
+        r = await envoyer(true);
+      }
+      if (r.ok && r.data) {
+        const d = r.data;
+        const lignes = [`✅ Code envoyé à ${d.count} joueur(s).`];
+        if (d.dejaEnvoyes) lignes.push(`ℹ️ Déjà reçu, non renvoyé : ${d.dejaEnvoyes}.`);
+        if (d.echecs) lignes.push(`⚠️ ÉCHEC pour ${d.echecs} joueur(s) : relance l'envoi, seuls ceux-là le recevront.`);
+        alert(lignes.join('\n'));
+        if (!d.echecs) setPpCode('');
+      } else {
+        setAlerteReseau(`Code NON envoyé : ${r.message}`);
+        alert('❌ Code non envoyé : ' + r.message);
+      }
+    } finally {
+      envoiCodeEnCours.current = false;
+      setPpSending(false);
+    }
   }
 
   // ── Surveillance ──────────────────────────────────────────
@@ -600,14 +679,13 @@ export default function Tournois({ session }: TournoisProps) {
 
     const cumulativePayload = buildCumulativePayload([...existingGames, newGame], st);
 
-    try {
-      const res = await fetch(`${API}/leaderboard/bulk-update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-        body: JSON.stringify({ tournamentId: t._id, stageIndex, players: cumulativePayload }),
+    {
+      const r = await appelApi('/leaderboard/bulk-update', {
+        methode: 'POST', clef: activeKey, delaiMs: 45000,
+        corps: { tournamentId: t._id, stageIndex, players: cumulativePayload },
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = r.data || {};
+      if (r.ok) {
         setReplayHistory(prev => prev.map(r => r.name === replayName ? { ...r, state: 'sent' } : r));
         const gid2 = gameId || `g_${Date.now()}`;
         setTournamentGames(prev => [{
@@ -616,10 +694,11 @@ export default function Tournois({ session }: TournoisProps) {
           backendId: data.data?._id, replayName,
         } as any, ...prev]);
       } else {
+        //  Plus d'echec muet : la partie est marquee en echec ET le bandeau
+        //  le dit. Un import manuel la renverra.
         setReplayHistory(prev => prev.map(r => r.name === replayName ? { ...r, state: 'failed' } : r));
+        setAlerteReseau(`Résultats de « ${replayName} » NON envoyés : ${r.message}. Réimporte cette partie.`);
       }
-    } catch {
-      setReplayHistory(prev => prev.map(r => r.name === replayName ? { ...r, state: 'failed' } : r));
     }
   }
 
@@ -645,14 +724,13 @@ export default function Tournois({ session }: TournoisProps) {
 
     const cumulativePayload = buildCumulativePayload([...existingGames, newGame]);
 
-    try {
-      const res = await fetch(`${API}/leaderboard/bulk-update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-        body: JSON.stringify({ tournamentId: selectedTournament._id, stageIndex, players: cumulativePayload }),
+    {
+      const r = await appelApi('/leaderboard/bulk-update', {
+        methode: 'POST', clef: activeKey, delaiMs: 45000,
+        corps: { tournamentId: selectedTournament._id, stageIndex, players: cumulativePayload },
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = r.data || {};
+      if (r.ok) {
         const gid = pendingGameId || `g_${Date.now()}`;
         setTournamentGames(prev => [{
           id: gid, date: new Date(), players: parsedPlayers,
@@ -671,9 +749,10 @@ export default function Tournois({ session }: TournoisProps) {
         setPendingGameId(null); setPendingReplayName(null);
         alert('✅ Résultats envoyés !');
       } else {
-        alert('❌ Erreur: ' + data.message);
+        setAlerteReseau(`Résultats NON envoyés : ${r.message}`);
+        alert('❌ Résultats non envoyés : ' + r.message);
       }
-    } catch { alert('❌ Erreur serveur'); }
+    }
   }
 
   // ── Build payload ─────────────────────────────────────────
@@ -690,18 +769,25 @@ export default function Tournois({ session }: TournoisProps) {
   function handleAction(epicId: string, name: string, action: string) {
     setActionMenu(null);
     if (action === 'disqualify') {
+      const avant = new Set(disqualified);
       const n = new Set(disqualified);
       const isDQ = n.has(epicId);
       isDQ ? n.delete(epicId) : n.add(epicId);
       setDisqualified(n);
       if (selectedTournament && selectedStage) {
-        const activeKey = localStorage.getItem('z7_external_api_key') || localStorage.getItem('z7_api_key') || session.apiKey;
         const stageIndex = (selectedTournament.stages || []).indexOf(selectedStage);
-        fetch(`${API}/leaderboard/player-mod`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-          body: JSON.stringify({ tournamentId: selectedTournament._id, stageIndex, epicId, disqualified: !isDQ }),
-        }).catch(() => {});
+        //  Le serveur fait foi : s'il refuse, l'ecran revient en arriere et
+        //  le dit — une disqualification affichee mais non enregistree
+        //  laisserait le joueur recevoir le code suivant.
+        appelApi('/leaderboard/player-mod', {
+          methode: 'PATCH', clef: clefActive(session.apiKey),
+          corps: { tournamentId: selectedTournament._id, stageIndex, epicId, disqualified: !isDQ },
+        }).then((r) => {
+          if (r.ok) return;
+          setDisqualified(avant);
+          setAlerteReseau(`${isDQ ? 'Levée de la disqualification' : 'Disqualification'} de ${name} NON enregistrée : ${r.message}`);
+          alert(`❌ ${isDQ ? 'Levée de la disqualification' : 'Disqualification'} NON enregistrée : ${r.message}`);
+        });
       }
     } else {
       setPointsPlayer(epicId); setPointsPlayerName(name);
@@ -736,11 +822,11 @@ export default function Tournois({ session }: TournoisProps) {
 
       const cumulativePayload = buildCumulativePayload(remainingGames);
 
-      await fetch(`${API}/leaderboard/bulk-update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-        body: JSON.stringify({ tournamentId: selectedTournament._id, stageIndex, players: cumulativePayload }),
-      }).catch(() => {});
+      const r = await appelApi('/leaderboard/bulk-update', {
+        methode: 'POST', clef: activeKey, delaiMs: 45000,
+        corps: { tournamentId: selectedTournament._id, stageIndex, players: cumulativePayload },
+      });
+      if (!r.ok) setAlerteReseau(`Classement NON mis à jour après la suppression : ${r.message}`);
     }
   }
 
@@ -754,13 +840,16 @@ export default function Tournois({ session }: TournoisProps) {
     setPointsMods(n);
     setShowPointsModal(false);
     if (selectedTournament && selectedStage) {
-      const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
       const stageIndex = (selectedTournament.stages || []).indexOf(selectedStage);
-      await fetch(`${API}/leaderboard/player-mod`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': activeKey },
-        body: JSON.stringify({ tournamentId: selectedTournament._id, stageIndex, epicId: pointsPlayer, pointsMod: newVal }),
-      }).catch(() => {});
+      const r = await appelApi('/leaderboard/player-mod', {
+        methode: 'PATCH', clef: clefActive(session.apiKey),
+        corps: { tournamentId: selectedTournament._id, stageIndex, epicId: pointsPlayer, pointsMod: newVal },
+      });
+      if (!r.ok) {
+        n.set(pointsPlayer, cur); setPointsMods(new Map(n));
+        setAlerteReseau(`Points de ${pointsPlayerName} NON enregistrés : ${r.message}`);
+        alert('❌ Points non enregistrés : ' + r.message);
+      }
     }
   }
 
@@ -821,17 +910,18 @@ export default function Tournois({ session }: TournoisProps) {
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
 
+      {alerteReseau && (
+        <div role="alert" style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.5)', color: '#fca5a5', fontSize: 13, display: 'flex', gap: 10, alignItems: 'center' }}>
+          <span style={{ flex: 1 }}>⚠️ {alerteReseau}</span>
+          <button onClick={() => setAlerteReseau('')} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', borderRadius: 6, cursor: 'pointer', padding: '2px 8px' }}>OK</button>
+        </div>
+      )}
+
       {/* CONFIG */}
       <div style={s.card}>
         <div style={s.cardRow}>
           <button
-              onClick={() => {
-                const activeKey = localStorage.getItem('z7_external_api_key') || session.apiKey;
-                fetch(`${API}/tournaments/my`, { headers: { 'x-api-key': activeKey } })
-                  .then(r => r.json())
-                  .then(d => { if (d.success && d.data) setTournaments(d.data); })
-                  .catch(() => {});
-              }}
+              onClick={() => { setAlerteReseau(''); chargerTournois(); }}
               disabled={surveillanceActive}
               style={{ ...s.btn, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.7)', flexShrink: 0, opacity: surveillanceActive ? 0.4 : 1 }}
             >↻ Rafraîchir</button>
@@ -839,7 +929,15 @@ export default function Tournois({ session }: TournoisProps) {
             <label style={s.label}>Tournoi</label>
             <Dropdown
               value={selectedTournament?._id || ''}
-              onChange={(_, item) => { setSelectedTournament(item); setSelectedStage(null); setTournamentGames([]); setReplayHistory([]); localStorage.removeItem('z7_tournament_games'); localStorage.removeItem('z7_replay_history'); }}
+              onChange={(_, item) => {
+                setSelectedTournament(item); setSelectedStage(null); setTournamentGames([]); setReplayHistory([]);
+                //  Changer de tournoi efface l'ecran des sanctions : celles du
+                //  nouveau tournoi sont relues a la selection de sa manche.
+                setDisqualified(new Set()); setPointsMods(new Map());
+                localStorage.removeItem('z7_tournament_games'); localStorage.removeItem('z7_replay_history');
+                localStorage.setItem('z7_selection_tournoi', item?._id || '');
+                localStorage.removeItem('z7_selection_manche');
+              }}
               placeholder="Sélectionner un tournoi"
               disabled={surveillanceActive}
               options={tournaments.map((t: any) => ({ value: t._id, label: t.name, item: t }))}
@@ -849,17 +947,7 @@ export default function Tournois({ session }: TournoisProps) {
             <label style={s.label}>Manche</label>
             <Dropdown
               value={selectedStage ? String((selectedTournament?.stages || []).indexOf(selectedStage)) : ''}
-              onChange={(_, item) => {
-                setSelectedStage(item);
-                if (selectedTournament && item) {
-                  const keyH = `z7_replay_history_${selectedTournament._id}_${item.name}`;
-                  const keyG = `z7_tournament_games_${selectedTournament._id}_${item.name}`;
-                  const savedH = localStorage.getItem(keyH);
-                  const savedG = localStorage.getItem(keyG);
-                  setReplayHistory(savedH ? JSON.parse(savedH).map((r: any) => ({ ...r, date: new Date(r.date) })) : []);
-                  setTournamentGames(savedG ? JSON.parse(savedG).map((g: any) => ({ ...g, date: new Date(g.date) })) : []);
-                }
-              }}
+              onChange={(_, item) => choisirManche(selectedTournament, item)}
               placeholder="Sélectionner une manche"
               disabled={surveillanceActive || !selectedTournament}
               options={(selectedTournament?.stages || []).map((st: any, i: number) => ({ value: String(i), label: st.name, item: st }))}
