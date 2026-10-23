@@ -9,7 +9,8 @@
     "start": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "tsc -b && vite build",
     "build:electron": "npm run build && electron-builder",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/codesPartie.test.ts"
   },
   "build": {
     "appId": "com.z7competition.client",

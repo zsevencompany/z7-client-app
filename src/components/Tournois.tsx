@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 
 import { API } from '../config';
 import { appelApi, clefActive } from '../reseau';
+import CodesPartie from './CodesPartie';
 
 // ── Dropdown custom ──────────────────────────────────────────
 function Dropdown({ value, onChange, options, placeholder, disabled }: {
@@ -140,6 +141,8 @@ export default function Tournois({ session }: TournoisProps) {
   //  Un double clic ne doit jamais declencher deux envois du code : l'etat
   //  React arrive trop tard pour le second clic, ce verrou non.
   const envoiCodeEnCours = useRef(false);
+  //  23/10/2026 : relit le panneau des games apres chaque publication de code.
+  const [rafraichirCodes, setRafraichirCodes] = useState(0);
   const [pendingReplayName, setPendingReplayName]   = useState<string | null>(null);
   const [gameModalMode, setGameModalMode]           = useState<'teams'|'players'>('teams');
 
@@ -483,6 +486,7 @@ export default function Tournois({ session }: TournoisProps) {
     } finally {
       envoiCodeEnCours.current = false;
       setPpSending(false);
+      setRafraichirCodes((n) => n + 1);
     }
   }
 
@@ -977,10 +981,17 @@ export default function Tournois({ session }: TournoisProps) {
               onClick={sendPPCode}
               disabled={!selectedTournament || !ppCode.trim() || ppSending}
               style={{ ...s.btn, background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: '#fff', border: 'none', opacity: (!selectedTournament || !ppCode.trim() || ppSending) ? 0.4 : 1 }}
+              title="Un nouveau code ouvre une nouvelle game ; le code en vigueur d'une game se corrige par « Modifier » dans le panneau Codes de partie."
             >{ppSending ? '⏳ Envoi...' : '📨 Envoyer PP'}</button>
           </div>
         </div>
       </div>
+
+      {/* 23/10/2026 : games et codes de la manche (meme moteur que le panel web) */}
+      {selectedTournament && selectedStage && (selectedTournament.stages || []).indexOf(selectedStage) >= 0 && (
+        <CodesPartie tournamentId={selectedTournament._id} stageIndex={(selectedTournament.stages || []).indexOf(selectedStage)} stageName={selectedStage.name}
+          clef={clefActive(session.apiKey)} jeton={session.token} rafraichir={rafraichirCodes} />
+      )}
 
       {/* MAIN GRID */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, flex: 1, minHeight: 0 }}>
