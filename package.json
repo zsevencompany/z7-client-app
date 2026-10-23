@@ -29,6 +29,10 @@
     ],
     "files": [
       "dist/**/*",
+      "!dist/win-unpacked{,/**/*}",
+      "!dist/*.exe",
+      "!dist/*.blockmap",
+      "!dist/*.yml",
       "main.js",
       "preload.js",
       "public/LOGO-Z7-V2.ico"
